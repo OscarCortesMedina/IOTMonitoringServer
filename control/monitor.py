@@ -58,6 +58,45 @@ def analyze_data():
     print(len(aggregation), "dispositivos revisados")
     print(alerts, "alertas enviadas")
 
+def check_medidas():
+
+    # Traer todos los ultimos 10 registros de temperatura y de humedad
+
+    umbral_temp = 20
+    umbral_humedad = 80
+    device_id = 1
+
+    # Parametros del Topico
+    country = "colombia"
+    state = "cundinamarca"
+    city = "bogota"
+    user = "admin2"
+
+    data_measurement_1 = Data.objects.filter(measurement_id = 1, station_id = device_id)[:1].values()
+    data_measurement_2 = Data.objects.filter(measurement_id = 2, station_id = device_id)[:1].values()
+    
+    sum_measurement_1 = 0;
+    sum_measurement_2 = 0;
+
+    for record in data_measurement_1:
+        sum_measurement_1 = sum_measurement_1 + record["avg_value"] 
+
+    prom_measurement_1 = sum_measurement_1 / 10;
+    print(prom_measurement_1)
+
+    for record in data_measurement_2:
+        sum_measurement_2 = sum_measurement_2 + record["avg_value"]
+
+    prom_measurement_2 = sum_measurement_2 / 10;
+    print(prom_measurement_2)
+        
+    if prom_measurement_1 > umbral_temp and prom_measurement_2 < umbral_humedad:
+        message = "umbral alcanzado"
+        topic = '{}/{}/{}/{}/in'.format(country, state, city, user)
+        print(datetime.now(), "Sending alert to {}".format(topic))
+        client.publish(topic, message)
+    else:
+        print("No cumplio")
 
 def on_connect(client, userdata, flags, rc):
     '''
@@ -100,12 +139,88 @@ def setup_mqtt():
         print('Ocurrió un error al conectar con el bróker MQTT:', e)
 
 
+def alert_temp_hum_monitor():
+    umbral_temp = 21
+    umbral_humedad = 45
+
+    print("Calculando alertas...")
+
+    data = Data.objects.filter(
+        base_time__gte=datetime.now() - timedelta(hours=1))
+    aggregation = data.annotate(check_value=Avg('avg_value')) \
+        .select_related('station', 'measurement') \
+        .select_related('station__user', 'station__location') \
+        .select_related('station__location__city', 'station__location__state',
+                        'station__location__country') \
+        .values('check_value', 'station__user__username',
+                'measurement__name',
+                'measurement__max_value',
+                'measurement__min_value',
+                'station__location__city__name',
+                'station__location__state__name',
+                'station__location__country__name')
+    alerts = 0
+
+    alerta_dispositivo = []
+
+    for item in aggregation:
+
+        variable = item["measurement__name"]
+
+        country = item['station__location__country__name']
+        state = item['station__location__state__name']
+        city = item['station__location__city__name']
+        user = item['station__user__username']
+
+        print("value "+str(item['check_value'])+" "+variable)
+
+        alerta_temp = variable == 'temperatura' and  item['check_value']>umbral_temp
+
+        topic = '{}/{}/{}/{}/in'.format(country, state, city, user)
+
+        if  alerta_temp and len(alerta_dispositivo) == 0:
+            alerta_dispositivo.append({"topic":topic,"temp":True,"hum":False})
+        elif alerta_temp:
+            condition = True
+            for alerta in alerta_dispositivo:
+                if alerta["topic"] == topic:
+                    alerta["temp"] = True
+                    condition = False
+            if condition:
+                alerta_dispositivo.append({"topic":topic,"temp":True,"hum":False})
+        
+        alerta_hum = variable == 'humedad' and  item['check_value']<umbral_humedad
+
+        if  alerta_hum and len(alerta_dispositivo) == 0:
+            alerta_dispositivo.append({"topic":topic,"temp":False,"hum":True})
+        elif alerta_hum:
+            condition = True
+            for alerta in alerta_dispositivo:
+                if alerta["topic"] == topic:
+                    alerta["hum"] = True
+                    condition = False
+            if condition:
+                alerta_dispositivo.append({"topic":topic,"temp":False,"hum":True})
+
+    for alerta in alerta_dispositivo:
+        if alerta["temp"] and alerta["hum"]:
+            message = "ALERT buzz"
+            topic = alerta["topic"]
+            print(datetime.now(), "Sending alert to {}".format(topic))
+            alerts+=1
+            client.publish(topic, message)
+
+    print(len(aggregation), "dispositivos revisados")
+    print(alerts, "alertas enviadas")
+
+
 def start_cron():
     '''
     Inicia el cron que se encarga de ejecutar la función analyze_data cada 5 minutos.
     '''
     print("Iniciando cron...")
     schedule.every(5).minutes.do(analyze_data)
+    schedule.every(1).minutes.do(alert_temp_hum_monitor)
     print("Servicio de control iniciado")
     while 1:
         schedule.run_pending()
